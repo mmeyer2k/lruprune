@@ -78,7 +78,7 @@ while read -r line; do
 
   filename=$(echo "$line" | cut -f 3)
 
-  if [ "$3" == "--delete!" ]; then
+  if [ "$3" == "--delete" ]; then
     rm -f "$filename"  # Delete the file
   fi
 
