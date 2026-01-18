@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 
+# Requires GNU coreutils (du -sb and find -printf are GNU-specific)
+# On macOS, install with: brew install coreutils findutils
+# Then use: export PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:$PATH"
+
+# Check for GNU coreutils
+if ! du --version 2>/dev/null | grep -q 'GNU'; then
+  echo "Error: GNU coreutils required. On macOS: brew install coreutils" >&2
+  exit 1
+fi
+
 # Function to convert size with magnitude suffix to bytes
 convert_to_bytes() {
   local size=$1
 
   # Validate that the size is a valid number with an optional suffix
   if [[ ! "$size" =~ ^([0-9]+)([KMGTP]?)$ ]]; then
-    echo "Error: Invalid target size format '$size'. Must be a number followed by an optional K, M, G, T suffix."
+    echo "Error: Invalid target size format '$size'. Must be a number followed by an optional K, M, G, T, P suffix." >&2
     return 1
   fi
 
@@ -18,14 +28,15 @@ convert_to_bytes() {
     M)  echo $(( number * 1024 * 1024 )) ;;  # Megabytes
     G)  echo $(( number * 1024 * 1024 * 1024 )) ;;  # Gigabytes
     T)  echo $(( number * 1024 * 1024 * 1024 * 1024 )) ;;  # Terabytes
+    P)  echo $(( number * 1024 * 1024 * 1024 * 1024 * 1024 )) ;;  # Petabytes
     "") echo "$number" ;;  # No suffix means it's in bytes already
-    *)  echo "Error: Unsupported size suffix '$suffix'" && return 1 ;;  # Unsupported suffix
+    *)  echo "Error: Unsupported size suffix '$suffix'" >&2 && return 1 ;;  # Unsupported suffix
   esac
 }
 
 # Check if the correct number of arguments is provided
-if [ $# -lt 2 ]; then
-  echo "Usage: $0 <directory> <target_size> [--delete!]"
+if [[ $# -lt 2 ]]; then
+  echo "Usage: $0 <directory> <target_size> [--delete]"
   echo "  <directory>          Directory to check"
   echo "  <target_size>        Target size (e.g., 10G, 500M)"
   echo "  --delete             Delete files to reach the target size"
@@ -34,8 +45,8 @@ fi
 
 # Check if the target size is a valid positive value with a valid suffix
 target=$(convert_to_bytes "$2")
-if [ $? -ne 0 ]; then
-  echo "Error: Invalid target size format."
+if [[ $? -ne 0 ]]; then
+  echo "Error: Invalid target size format." >&2
   exit 1
 fi
 
@@ -46,8 +57,8 @@ du_output=$(du -sb "$1")
 du_exit_code=$?
 
 # Check if the du command failed
-if [ $du_exit_code -ne 0 ]; then
-  echo "Error: Failed to calculate the size of the directory '$1'. Please check if the directory exists and if you have the necessary permissions."
+if [[ $du_exit_code -ne 0 ]]; then
+  echo "Error: Failed to calculate the size of the directory '$1'. Please check if the directory exists and if you have the necessary permissions." >&2
   exit 1
 fi
 
@@ -57,7 +68,11 @@ actual=$(echo "$du_output" | cut -f 1)
 echo "Size of [$1] is $actual bytes"
 echo "Target size is $target bytes"
 
-if [ "$3" != "--delete" ]; then
+# Determine if we're in dry run or delete mode
+dry_run=true
+if [[ "$3" == "--delete" ]]; then
+  dry_run=false
+else
   echo "Performing dry run..."
 fi
 
@@ -67,20 +82,35 @@ if (( actual <= target )); then
   exit 0
 fi
 
+# Track summary statistics
+total_freed=0
+files_deleted=0
+
 while read -r line; do
   # Exit if the actual size is less than the target size
   if (( actual < target )); then
-    exit 0
+    break
   fi
 
   freed=$(echo "$line" | cut -f 2)
   actual=$(( actual - freed ))  # Decrease actual size
+  total_freed=$(( total_freed + freed ))
+  files_deleted=$(( files_deleted + 1 ))
 
   filename=$(echo "$line" | cut -f 3)
 
-  if [ "$3" == "--delete" ]; then
+  if [[ "$dry_run" == false ]]; then
     rm -f "$filename"  # Delete the file
+    echo "$line"
+  else
+    echo "[DRY RUN] $line"
   fi
-
-  echo "$line"
 done < <(find "$1" -type f -printf "%A+\t%s\t%p\n" | sort)
+
+# Print summary
+echo ""
+if [[ "$dry_run" == true ]]; then
+  echo "Summary: Would delete $files_deleted file(s), freeing $total_freed bytes"
+else
+  echo "Summary: Deleted $files_deleted file(s), freed $total_freed bytes"
+fi
