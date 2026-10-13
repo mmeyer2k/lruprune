@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
-# Requires GNU coreutils (du -sb and find -printf are GNU-specific)
-# On macOS, install with: brew install coreutils findutils
-# Then use: export PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:$PATH"
+# Requires GNU coreutils (find -printf is GNU-specific)
+# On macOS, install with: brew install findutils
+# Then use: export PATH="/opt/homebrew/opt/findutils/libexec/gnubin:$PATH"
 
-# Check for GNU coreutils
-if ! du --version 2>/dev/null | grep -q 'GNU'; then
-  echo "Error: GNU coreutils required. On macOS: brew install coreutils" >&2
+# Check for GNU find
+if ! find --version 2>/dev/null | grep -q 'GNU'; then
+  echo "Error: GNU findutils required. On macOS: brew install findutils" >&2
   exit 1
 fi
 
@@ -50,22 +50,23 @@ if [[ $? -ne 0 ]]; then
   exit 1
 fi
 
-echo "Calculating size of [$1]..."
-
-# Run the du command and check for failure
-du_output=$(du -sb "$1")
-du_exit_code=$?
-
-# Check if the du command failed
-if [[ $du_exit_code -ne 0 ]]; then
-  echo "Error: Failed to calculate the size of the directory '$1'. Please check if the directory exists and if you have the necessary permissions." >&2
+# Check if the directory exists
+if [[ ! -d "$1" ]]; then
+  echo "Error: Directory '$1' does not exist." >&2
   exit 1
 fi
 
-# Extract the size from the du output
-actual=$(echo "$du_output" | cut -f 1)
+echo "Calculating size of [$1]..."
 
-echo "Size of [$1] is $actual bytes"
+# Calculate total logical size using find
+# Note: This sums the logical size of all files
+total_size=$(find "$1" -type f -printf "%s\n" | awk '{ sum += $1 } END { print sum+0 }')
+
+if [[ -z "$total_size" ]]; then
+  total_size=0
+fi
+
+echo "Size of [$1] is $total_size bytes"
 echo "Target size is $target bytes"
 
 # Determine if we're in dry run or delete mode
@@ -77,35 +78,53 @@ else
 fi
 
 # Exit early if the directory is already below the target size
-if (( actual <= target )); then
+if (( total_size <= target )); then
   echo "Directory size is already below the target size. No action needed."
   exit 0
 fi
+
+# Calculate how much to delete
+amount_to_delete=$(( total_size - target ))
+
+echo "Need to delete $amount_to_delete bytes..."
 
 # Track summary statistics
 total_freed=0
 files_deleted=0
 
-while read -r line; do
-  # Exit if the actual size is less than the target size
-  if (( actual < target )); then
+# Use find to get files sorted by size (newest first? or largest first?)
+# Here, we sort by size descending to delete largest files first (efficient)
+# Use -print0 and xargs -0 for safe filename handling
+# Note: This approach deletes files in batches, not one by one with size tracking.
+# To track size precisely, we need to process files one by one.
+
+# Alternative: Process files one by one with find and awk
+# This is slower but more accurate for size tracking.
+
+# Let's use a while loop with find and awk for accurate size tracking
+# But use -print0 and read -d '' for safe filename handling
+
+current_freed=0
+while IFS= read -r -d '' file_info; do
+  # file_info is in the format: "size\tfilename"
+  file_size="${file_info%%	*}"  # Get size (before tab)
+  file_name="${file_info#*	}"  # Get filename (after tab)
+
+  if (( current_freed >= amount_to_delete )); then
     break
   fi
 
-  freed=$(echo "$line" | cut -f 2)
-  actual=$(( actual - freed ))  # Decrease actual size
-  total_freed=$(( total_freed + freed ))
+  current_freed=$(( current_freed + file_size ))
+  total_freed=$(( total_freed + file_size ))
   files_deleted=$(( files_deleted + 1 ))
 
-  filename=$(echo "$line" | cut -f 3)
-
   if [[ "$dry_run" == false ]]; then
-    rm -f "$filename"  # Delete the file
-    echo "$line"
+    rm -f "$file_name"  # Delete the file
+    echo "Deleted: $file_name ($file_size bytes)"
   else
-    echo "[DRY RUN] $line"
+    echo "[DRY RUN] Would delete: $file_name ($file_size bytes)"
   fi
-done < <(find "$1" -type f -printf "%A+\t%s\t%p\n" | sort)
+done < <(find "$1" -type f -printf "%s\t%p\0" | sort -z -t $'\t' -k1,1 -rn)
 
 # Print summary
 echo ""
